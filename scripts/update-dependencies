@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/update-dependencies [--dry-run]
+
+Update pinned nixpkgs and BMAD Method revisions. Regenerate the BMAD npm
+dependency hash, then validate Serena's UV launcher and configuration.
+
+Options:
+  --dry-run  Show available pin updates without writing files.
+  -h, --help Show this help.
+EOF
+}
+
+die() {
+  printf 'update-dependencies: %s\n' "$*" >&2
+  exit 1
+}
+
+dry_run=false
+project_root=''
+backup_dir=''
+completed=false
+
+serena_config_files=(
+  .mcp.json
+  .codex/config.toml
+  .github/mcp.json
+  .gemini/settings.json
+  .cursor/mcp.json
+  .cline/mcp.json
+  opencode.json
+  .qwen/settings.json
+  .windsurf/mcp_config.json
+)
+
+updated_files=(
+  npins/sources.json
+  nix/bmad-method.nix
+)
+
+parse_arguments() {
+  while (($# > 0)); do
+    case "$1" in
+      --dry-run)
+        dry_run=true
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown option: $1"
+        ;;
+    esac
+    shift
+  done
+}
+
+check_required_commands() {
+  local -a required_commands=(
+    cp
+    cmp
+    dirname
+    git
+    grep
+    jq
+    mkdir
+    mktemp
+    nix-build
+    nix-instantiate
+    nix-shell
+    npins
+    realpath
+    rm
+    sed
+    shellcheck
+    tail
+    taplo
+    uvx
+    wc
+  )
+  local -a missing_commands=()
+  local required_command
+
+  for required_command in "${required_commands[@]}"; do
+    command -v "$required_command" >/dev/null 2>&1 || missing_commands+=("$required_command")
+  done
+
+  ((${#missing_commands[@]} == 0)) ||
+    die "missing required commands: ${missing_commands[*]}. Run through nix-shell or load the project direnv environment"
+}
+
+resolve_project_root() {
+  local script_path git_root
+
+  script_path=$(realpath -- "${BASH_SOURCE[0]}")
+  project_root=$(realpath -- "$(dirname -- "$script_path")/..")
+  git_root=$(git -C "$project_root" rev-parse --show-toplevel 2>/dev/null) ||
+    die 'project root is not a Git worktree'
+  [[ $(realpath -- "$git_root") == "$project_root" ]] ||
+    die 'script must be located in the Git worktree root scripts directory'
+
+  cd "$project_root"
+}
+
+configure_local_runtime() {
+  if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+    export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+  fi
+}
+
+read_bmad_version() {
+  jq -er '.pins["bmad-method"].version | ltrimstr("v")' npins/sources.json
+}
+
+read_nixpkgs_revision() {
+  jq -er '.pins.nixpkgs.revision' npins/sources.json
+}
+
+assert_current_state() {
+  local bmad_version config_file
+
+  jq empty npins/sources.json
+  bmad_version=$(read_bmad_version)
+  [[ $(grep -Fxc "  version = \"$bmad_version\";" nix/bmad-method.nix) == 1 ]] ||
+    die 'BMAD package version does not match its npins release'
+
+  for config_file in "${serena_config_files[@]}"; do
+    [[ $(grep -Fo 'git+https://github.com/oraios/serena' "$config_file" | wc -l) == 1 ]] ||
+      die "$config_file does not contain exactly one Serena source"
+    if grep -Fq 'git+https://github.com/oraios/serena@' "$config_file"; then
+      die "$config_file pins a Serena revision"
+    fi
+  done
+}
+
+assert_writable_state() {
+  local relative_file
+
+  for relative_file in "${updated_files[@]}"; do
+    [[ -w $relative_file ]] || die "$relative_file is not writable"
+  done
+}
+
+cleanup() {
+  local exit_code=$?
+  local relative_file
+
+  if ! $completed; then
+    printf '%s\n' 'Dependency update failed; restoring versioned files.' >&2
+    for relative_file in "${updated_files[@]}"; do
+      if ! cmp -s -- "$backup_dir/$relative_file" "$project_root/$relative_file"; then
+        cp -- "$backup_dir/$relative_file" "$project_root/$relative_file"
+      fi
+    done
+  fi
+
+  rm -rf -- "$backup_dir"
+  exit "$exit_code"
+}
+
+prepare_rollback() {
+  local relative_file destination
+
+  backup_dir=$(mktemp -d "${TMPDIR:-/tmp}/update-dependencies.XXXXXX")
+  for relative_file in "${updated_files[@]}"; do
+    destination="$backup_dir/$relative_file"
+    mkdir -p -- "$(dirname -- "$destination")"
+    cp -- "$project_root/$relative_file" "$destination"
+  done
+
+  trap cleanup EXIT
+  trap 'exit 130' HUP INT TERM
+}
+
+update_pins() {
+  npins update --frozen bmad-method nixpkgs
+}
+
+update_bmad_package() {
+  local old_version=$1
+  local new_version=$2
+  local build_log npm_deps_hash
+
+  if [[ $old_version == "$new_version" ]]; then
+    return 0
+  fi
+
+  sed -i \
+    "s|^  version = \"$old_version\";$|  version = \"$new_version\";|" \
+    nix/bmad-method.nix
+  [[ $(grep -Fxc "  version = \"$new_version\";" nix/bmad-method.nix) == 1 ]] ||
+    die 'failed to update BMAD package version'
+
+  sed -i -E \
+    's|^  npmDepsHash = "sha256-[^"]+";$|  npmDepsHash = lib.fakeHash;|' \
+    nix/bmad-method.nix
+  grep -Fxq '  npmDepsHash = lib.fakeHash;' nix/bmad-method.nix ||
+    die 'failed to replace BMAD npm dependency hash'
+
+  build_log="$backup_dir/bmad-build.log"
+  if nix-build --no-out-link -A bmad-method default.nix >"$build_log" 2>&1; then
+    die 'BMAD build unexpectedly accepted the fake npm dependency hash'
+  fi
+
+  npm_deps_hash=$(sed -n 's/.*got: \(sha256-[A-Za-z0-9+\/=]*\).*/\1/p' "$build_log" | tail -1)
+  [[ -n $npm_deps_hash ]] || die 'BMAD build did not report a replacement npm dependency hash'
+
+  sed -i \
+    "s|^  npmDepsHash = lib.fakeHash;$|  npmDepsHash = \"$npm_deps_hash\";|" \
+    nix/bmad-method.nix
+}
+
+validate_result() {
+  local expected_bmad_version bmad_output actual_bmad_version
+
+  expected_bmad_version=$(read_bmad_version)
+  assert_current_state
+  nix-instantiate --parse default.nix >/dev/null
+  nix-instantiate --eval --strict -A shell.drvPath default.nix >/dev/null
+
+  bmad_output=$(nix-build --no-out-link -A bmad-method default.nix)
+  actual_bmad_version=$("$bmad_output/bin/bmad-method" --version)
+  [[ $actual_bmad_version == "$expected_bmad_version" ]] ||
+    die "BMAD executable reports $actual_bmad_version, expected $expected_bmad_version"
+
+  nix-shell --run 'specify --version' >/dev/null
+  uvx --from git+https://github.com/oraios/serena serena --version >/dev/null
+
+  jq empty \
+    .mcp.json \
+    .devcontainer/devcontainer.json \
+    .devcontainer/devcontainer-lock.json \
+    .github/mcp.json \
+    .gemini/settings.json \
+    .cursor/mcp.json \
+    .cline/mcp.json \
+    opencode.json \
+    .qwen/settings.json \
+    .windsurf/mcp_config.json
+  taplo lint .codex/config.toml
+  shellcheck scripts/clean-bootstrap scripts/update-dependencies
+  git diff --check
+
+}
+
+print_versions() {
+  local label=$1
+
+  printf '%s:\n' "$label"
+  printf '  BMAD Method: %s\n' "$(read_bmad_version)"
+  printf '  nixpkgs: %s\n' "$(read_nixpkgs_revision)"
+}
+
+main() {
+  local old_bmad_version new_bmad_version
+
+  parse_arguments "$@"
+  check_required_commands
+  resolve_project_root
+  configure_local_runtime
+  assert_current_state
+
+  if $dry_run; then
+    npins update --dry-run --frozen bmad-method nixpkgs
+    return
+  fi
+
+  old_bmad_version=$(read_bmad_version)
+  print_versions Before
+
+  assert_writable_state
+  prepare_rollback
+  update_pins
+
+  new_bmad_version=$(read_bmad_version)
+  update_bmad_package "$old_bmad_version" "$new_bmad_version"
+  validate_result
+
+  completed=true
+  print_versions After
+  printf '%s\n' 'Dependency update complete.'
+}
+
+main "$@"

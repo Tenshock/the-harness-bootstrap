@@ -1,0 +1,27 @@
+{
+  "serena": {
+    "type": "local",
+    "command": "direnv",
+    "args": [
+      "exec",
+      ".",
+      "uvx",
+      "--from",
+      "git+https://github.com/oraios/serena",
+      "serena",
+      "start-mcp-server",
+      "--project-from-cwd",
+      "--context=copilot-cli",
+      "--open-web-dashboard",
+      "false"
+    ],
+    "env": {
+      "SERENA_HOME": ".serena/runtime",
+      "NPM_CONFIG_CACHE": ".serena/runtime/npm-cache",
+      "UV_CACHE_DIR": ".uv-cache",
+      "UV_TOOL_DIR": ".uv-tools",
+      "UV_PYTHON_INSTALL_DIR": ".uv-python"
+    },
+    "tools": ["*"]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "serena": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena",
+        "start-mcp-server",
+        "--project-from-cwd",
+        "--context=claude-code",
+        "--open-web-dashboard",
+        "false"
+      ],
+      "env": {
+        "SERENA_HOME": "${CLAUDE_PROJECT_DIR}/.serena/runtime",
+        "NPM_CONFIG_CACHE": "${CLAUDE_PROJECT_DIR}/.serena/runtime/npm-cache",
+        "UV_CACHE_DIR": "${CLAUDE_PROJECT_DIR}/.uv-cache",
+        "UV_TOOL_DIR": "${CLAUDE_PROJECT_DIR}/.uv-tools",
+        "UV_PYTHON_INSTALL_DIR": "${CLAUDE_PROJECT_DIR}/.uv-python"
+      }
+    }
+  }
+}

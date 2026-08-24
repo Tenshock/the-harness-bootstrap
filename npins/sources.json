@@ -1,0 +1,35 @@
+{
+  "pins": {
+    "bmad-method": {
+      "type": "GitRelease",
+      "repository": {
+        "type": "GitHub",
+        "owner": "bmad-code-org",
+        "repo": "BMAD-METHOD"
+      },
+      "pre_releases": false,
+      "version_upper_bound": null,
+      "release_prefix": null,
+      "submodules": false,
+      "version": "v6.11.0",
+      "revision": "178414679b11a171ca1597b0ebc1723ed488fc73",
+      "url": "https://api.github.com/repos/bmad-code-org/BMAD-METHOD/tarball/refs/tags/v6.11.0",
+      "hash": "sha256-j3Psq6clod1Y6wOcSUA6cM5GRJhre7DKp5+MROphV30=",
+      "frozen": true
+    },
+    "nixpkgs": {
+      "type": "Git",
+      "repository": {
+        "type": "GitHub",
+        "owner": "NixOS",
+        "repo": "nixpkgs"
+      },
+      "branch": "master",
+      "submodules": false,
+      "revision": "1b56b85ac6be584ad3c1448758fb0ce7d8f8ebb5",
+      "url": "https://github.com/NixOS/nixpkgs/archive/1b56b85ac6be584ad3c1448758fb0ce7d8f8ebb5.tar.gz",
+      "hash": "sha256-enVzHQL0IW8mTHbBGZ7KfU85L+uBm8Ucuq1On7MHLtE="
+    }
+  },
+  "version": 8
+}

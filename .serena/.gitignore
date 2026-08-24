@@ -1,0 +1,5 @@
+# Serena-generated project state and local overrides.
+cache/
+logs/
+runtime/
+project.local.yml

@@ -1,0 +1,5 @@
+.direnv/
+.uv-cache/
+.uv-python/
+.uv-tools/
+.nix-bin/

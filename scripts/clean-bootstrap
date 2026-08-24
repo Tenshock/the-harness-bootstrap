@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/clean-bootstrap [--dry-run] [--force] <project-name>
+
+Prepare a cloned harness as a new project with shared Spec Kit and BMAD skills.
+
+Options:
+  --dry-run      Show planned changes without writing files.
+  --force        Allow initialization with a dirty Git worktree.
+  -h, --help     Show this help.
+
+<project-name> must use letters, numbers, dots, underscores, or hyphens and
+must start with a letter or number.
+EOF
+}
+
+die() {
+  printf 'clean-bootstrap: %s\n' "$*" >&2
+  exit 1
+}
+
+dry_run=false
+force=false
+project_name=''
+script_path=''
+project_root=''
+git_root=''
+readme=''
+agents=''
+contributing=''
+serena_project=''
+skills_dir=''
+specify_state=''
+bmad_state=''
+bmad_output=''
+backup_dir=''
+changed=false
+completed=false
+agents_tmp=''
+contributing_tmp=''
+serena_tmp=''
+
+parse_arguments() {
+  while (($# > 0)); do
+    case "$1" in
+      --dry-run)
+        dry_run=true
+        ;;
+      --force)
+        force=true
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        (($# == 1)) || die 'expected exactly one project name after --'
+        project_name=$1
+        shift
+        break
+        ;;
+      -*)
+        die "unknown option: $1"
+        ;;
+      *)
+        [[ -z $project_name ]] || die 'expected exactly one project name'
+        project_name=$1
+        ;;
+    esac
+    shift
+  done
+}
+
+validate_project_name() {
+  [[ -n $project_name ]] || die 'missing project name'
+  [[ $project_name =~ ^[[:alnum:]][[:alnum:]_.-]*$ ]] ||
+    die 'project name must start with a letter or number and contain only letters, numbers, dots, underscores, or hyphens'
+}
+
+check_required_commands() {
+  local -a required_commands=(realpath dirname git grep find)
+  local -a missing_commands=()
+  local required_command
+
+  if ! $dry_run; then
+    required_commands+=(sed mktemp cp chmod mv rm tail nix-instantiate jq specify bmad-method)
+  fi
+
+  for required_command in "${required_commands[@]}"; do
+    command -v "$required_command" >/dev/null 2>&1 || missing_commands+=("$required_command")
+  done
+
+  if ((${#missing_commands[@]} > 0)); then
+    die "missing required commands: ${missing_commands[*]}. Run through nix-shell or authorize and load the project direnv environment"
+  fi
+}
+
+resolve_project_paths() {
+  script_path=$(realpath -- "${BASH_SOURCE[0]}")
+  project_root=$(realpath -- "$(dirname -- "$script_path")/..")
+  git_root=$(git -C "$project_root" rev-parse --show-toplevel 2>/dev/null) ||
+    die 'project root is not a Git worktree'
+  [[ $(realpath -- "$git_root") == "$project_root" ]] ||
+    die 'script must be located in the Git worktree root scripts directory'
+
+  readme="$project_root/README.md"
+  agents="$project_root/AGENTS.md"
+  contributing="$project_root/CONTRIBUTING.md"
+  serena_project="$project_root/.serena/project.yml"
+  skills_dir="$project_root/.agents/skills"
+  specify_state="$project_root/.specify"
+  bmad_state="$project_root/_bmad"
+  bmad_output="$project_root/_bmad-output"
+}
+
+validate_source_project() {
+  local required_file generated_path
+
+  for required_file in "$readme" "$agents" "$contributing" "$serena_project"; do
+    [[ -f $required_file ]] || die "missing required file: ${required_file#"$project_root/"}"
+  done
+
+  grep -Fxq '# The Harness Bootstrap' "$readme" ||
+    die 'README.md does not contain the expected bootstrap title; project may already be initialized'
+  grep -Fxq '# Repository Instructions' "$agents" ||
+    die 'AGENTS.md does not contain the expected bootstrap heading; project may already be initialized'
+  grep -Fxq "project_name: 'harness-bootstrap'" "$serena_project" ||
+    die '.serena/project.yml does not contain the expected bootstrap project name; project may already be initialized'
+  [[ -d $skills_dir ]] || die 'missing required directory: .agents/skills'
+  [[ -f $skills_dir/add-serena-lsp/SKILL.md ]] ||
+    die 'missing required shared skill: .agents/skills/add-serena-lsp/SKILL.md'
+  [[ -f $skills_dir/handoff-bmad-to-speckit/SKILL.md ]] ||
+    die 'missing required shared skill: .agents/skills/handoff-bmad-to-speckit/SKILL.md'
+
+  for generated_path in "$specify_state" "$bmad_state" "$bmad_output"; do
+    if [[ -e $generated_path || -L $generated_path ]]; then
+      die "existing generated state: ${generated_path#"$project_root/"}; start from a fresh bootstrap clone"
+    fi
+  done
+
+  while IFS= read -r -d '' generated_path; do
+    die "existing generated skill: ${generated_path#"$project_root/"}; start from a fresh bootstrap clone"
+  done < <(
+    find "$skills_dir" -mindepth 1 -maxdepth 1 \
+      \( -name 'speckit-*' -o -name 'bmad-*' \) -print0
+  )
+
+  if ! $dry_run && ! $force && [[ -n $(git -C "$project_root" status --porcelain) ]]; then
+    die 'Git worktree is dirty; commit or stash changes, or use --force'
+  fi
+}
+
+print_plan() {
+  printf 'Project root: %s\n' "$project_root"
+  printf 'Project name: %s\n' "$project_name"
+  printf '%s\n' 'Planned changes:'
+  printf '%s\n' '  - replace README.md with a minimal project heading'
+  printf '%s\n' '  - replace harness-specific AGENTS.md identity with project instructions'
+  printf '%s\n' '  - remove the harness-only contribution constraint'
+  printf '%s\n' '  - update .serena/project.yml project_name'
+  printf '%s\n' '  - initialize Spec Kit in the canonical shared skills directory'
+  printf '%s\n' '  - install BMAD Method bmm skills in the same shared directory'
+  printf '%s\n' '  - validate generated workflow state and shared skill links'
+  printf '%s\n' '  - remove scripts/clean-bootstrap after validation'
+}
+
+remove_generated_state() {
+  local generated_path
+
+  for generated_path in "$specify_state" "$bmad_state" "$bmad_output"; do
+    if [[ -e $generated_path || -L $generated_path ]]; then
+      rm -rf -- "$generated_path"
+    fi
+  done
+
+  if [[ -d $skills_dir ]]; then
+    while IFS= read -r -d '' generated_path; do
+      rm -rf -- "$generated_path"
+    done < <(
+      find "$skills_dir" -mindepth 1 -maxdepth 1 \
+        \( -name 'speckit-*' -o -name 'bmad-*' \) -print0
+    )
+  fi
+}
+
+cleanup() {
+  local status=$?
+
+  if ! $completed && $changed; then
+    printf '%s\n' 'Bootstrap failed; restoring original files and removing generated state.' >&2
+    cp -- "$backup_dir/README.md" "$readme"
+    cp -- "$backup_dir/AGENTS.md" "$agents"
+    cp -- "$backup_dir/CONTRIBUTING.md" "$contributing"
+    cp -- "$backup_dir/project.yml" "$serena_project"
+    remove_generated_state
+  fi
+
+  for temporary_file in "$agents_tmp" "$contributing_tmp" "$serena_tmp"; do
+    [[ -z $temporary_file ]] || rm -f -- "$temporary_file"
+  done
+  rm -rf -- "$backup_dir"
+  exit "$status"
+}
+
+prepare_rollback() {
+  backup_dir=$(mktemp -d "${TMPDIR:-/tmp}/clean-bootstrap.XXXXXX")
+  trap cleanup EXIT
+  trap 'exit 130' HUP INT TERM
+
+  cp -- "$readme" "$backup_dir/README.md"
+  cp -- "$agents" "$backup_dir/AGENTS.md"
+  cp -- "$contributing" "$backup_dir/CONTRIBUTING.md"
+  cp -- "$serena_project" "$backup_dir/project.yml"
+
+  changed=true
+}
+
+apply_changes() {
+  printf '# %s\n' "$project_name" >"$readme"
+
+  agents_tmp=$(mktemp "$project_root/.AGENTS.md.XXXXXX")
+  sed \
+    -e 's/^This repository provides shared development tooling for agent clients\. It is not application code\.$/This repository uses shared development tooling for agent clients./' \
+    "$agents" >"$agents_tmp"
+  chmod --reference="$agents" "$agents_tmp"
+  mv -- "$agents_tmp" "$agents"
+
+  contributing_tmp=$(mktemp "$project_root/.CONTRIBUTING.md.XXXXXX")
+  sed 's/^- Keep changes focused and agent-agnostic\.$/- Keep changes focused./' \
+    "$contributing" >"$contributing_tmp"
+  chmod --reference="$contributing" "$contributing_tmp"
+  mv -- "$contributing_tmp" "$contributing"
+
+  serena_tmp=$(mktemp "$project_root/.serena/.project.yml.XXXXXX")
+  sed "s/^project_name: 'harness-bootstrap'$/project_name: '$project_name'/" \
+    "$serena_project" >"$serena_tmp"
+  chmod --reference="$serena_project" "$serena_tmp"
+  mv -- "$serena_tmp" "$serena_project"
+}
+
+initialize_workflows() {
+  local specify_log="$backup_dir/specify.log"
+  local bmad_log="$backup_dir/bmad.log"
+
+  printf '%s\n' 'Initializing Spec Kit shared skills...'
+  if ! (
+    cd "$project_root"
+    specify init \
+      --here \
+      --force \
+      --non-interactive \
+      --ignore-agent-tools \
+      --integration codex \
+      --script sh
+  ) >"$specify_log" 2>&1; then
+    printf '%s\n' 'Spec Kit initialization output:' >&2
+    tail -n 80 -- "$specify_log" >&2
+    die 'Spec Kit initialization failed'
+  fi
+
+  printf '%s\n' 'Installing BMAD Method shared skills...'
+  if ! (
+    cd "$project_root"
+    bmad-method install \
+      --directory "$project_root" \
+      --yes \
+      --modules bmm \
+      --tools codex
+  ) >"$bmad_log" 2>&1; then
+    printf '%s\n' 'BMAD Method installation output:' >&2
+    tail -n 80 -- "$bmad_log" >&2
+    die 'BMAD Method installation failed'
+  fi
+}
+
+validate_result() {
+  local skill_link required_generated_path
+
+  grep -Fxq "# $project_name" "$readme"
+  grep -Fxq '# Repository Instructions' "$agents"
+  grep -Fxq 'This repository uses shared development tooling for agent clients.' "$agents"
+  grep -Fxq -- '- Keep changes focused.' "$contributing"
+  grep -Fxq "project_name: '$project_name'" "$serena_project"
+
+  jq -e \
+    '.ai == "codex" and .ai_skills == true and .integration == "codex" and .script == "sh"' \
+    "$specify_state/init-options.json" >/dev/null
+
+  for required_generated_path in \
+    "$specify_state/scripts/bash" \
+    "$specify_state/templates/spec-template.md" \
+    "$bmad_state/core" \
+    "$bmad_state/bmm" \
+    "$bmad_output" \
+    "$skills_dir/speckit-specify/SKILL.md" \
+    "$skills_dir/speckit-plan/SKILL.md" \
+    "$skills_dir/bmad-product-brief/SKILL.md" \
+    "$skills_dir/bmad-prd/SKILL.md" \
+    "$skills_dir/add-serena-lsp/SKILL.md" \
+    "$skills_dir/handoff-bmad-to-speckit/SKILL.md"; do
+    [[ -e $required_generated_path ]] ||
+      die "missing generated workflow state: ${required_generated_path#"$project_root/"}"
+  done
+
+  for skill_link in \
+    "$project_root/.claude/skills" \
+    "$project_root/.cline/skills" \
+    "$project_root/.gemini/skills" \
+    "$project_root/.qwen/skills" \
+    "$project_root/.windsurf/skills"; do
+    [[ -L $skill_link && -d $skill_link ]] ||
+      die "shared skill link does not resolve: ${skill_link#"$project_root/"}"
+  done
+
+  (
+    cd "$project_root"
+    nix-instantiate --parse default.nix >/dev/null
+    nix-instantiate --eval --strict -A shell.drvPath default.nix >/dev/null
+    jq empty \
+      .mcp.json \
+      .devcontainer/devcontainer.json \
+      .devcontainer/devcontainer-lock.json \
+      .github/mcp.json \
+      .gemini/settings.json \
+      .cursor/mcp.json \
+      .cline/mcp.json \
+      opencode.json \
+      .qwen/settings.json \
+      .windsurf/mcp_config.json
+    git diff --check
+  )
+}
+
+main() {
+  parse_arguments "$@"
+  validate_project_name
+  check_required_commands
+  resolve_project_paths
+  validate_source_project
+  print_plan
+
+  if $dry_run; then
+    printf '%s\n' 'Dry run complete; no files changed.'
+    return
+  fi
+
+  prepare_rollback
+  apply_changes
+  initialize_workflows
+  validate_result
+  completed=true
+
+  rm -- "$script_path"
+
+  printf '%s\n' 'Project ready. Launch any supported agent and invoke bmad-product-brief.'
+}
+
+main "$@"

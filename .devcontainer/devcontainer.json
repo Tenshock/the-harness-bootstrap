@@ -1,0 +1,27 @@
+{
+  "name": "Development Harness",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/nix:1": {
+      "packages": "direnv,uv"
+    }
+  },
+  "postCreateCommand": [
+    "bash",
+    "-lc",
+    "nix-shell --run true && direnv allow ."
+  ],
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.profiles.linux": {
+          "Nix shell": {
+            "path": "nix-shell"
+          }
+        },
+        "terminal.integrated.defaultProfile.linux": "Nix shell"
+      }
+    }
+  },
+  "remoteUser": "vscode"
+}
